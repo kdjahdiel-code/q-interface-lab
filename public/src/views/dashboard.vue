@@ -278,13 +278,15 @@
                 <textarea v-model="batchAccounts" rows="6" class="mt-1 block w-full rounded-xl border-gray-300 bg-white/50 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 transition-all duration-300 h-36 text-base px-4 py-3 resize-none"></textarea>
               </div>
               <div class="flex justify-end space-x-4 pt-4">
-                <button @click="showAddModal = false" 
-                        class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 transition-all duration-300">
+                <button @click="showAddModal = false"
+                        :disabled="isBatchAdding"
+                        class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 transition-all duration-300 disabled:opacity-50">
                   取消
                 </button>
-                <button @click="addBatchTokens" 
-                        class="px-4 py-2 rounded-xl bg-black text-white hover:bg-white hover:text-black transition-all duration-300">
-                  批量添加
+                <button @click="addBatchTokens"
+                        :disabled="isBatchAdding"
+                        class="px-4 py-2 rounded-xl bg-black text-white hover:bg-white hover:text-black transition-all duration-300 disabled:opacity-50">
+                  {{ isBatchAdding ? '添加中...' : '批量添加' }}
                 </button>
               </div>
             </div>
@@ -296,17 +298,21 @@
     <!-- Toast 通知 -->
     <div v-if="toast.show"
          :class="[
-           'fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg transform transition-all duration-300',
-           toast.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-red-500 text-white'
+           'fixed top-4 right-4 z-50 px-6 py-4 rounded-xl shadow-lg transform transition-all duration-300 max-w-md',
+           toast.type === 'success' ? 'bg-emerald-500 text-white' :
+           toast.type === 'warning' ? 'bg-amber-500 text-white' : 'bg-red-500 text-white'
          ]">
       <div class="flex items-center space-x-2">
-        <svg v-if="toast.type === 'success'" class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+        <svg v-if="toast.type === 'success'" class="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
           <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
         </svg>
-        <svg v-else class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+        <svg v-else-if="toast.type === 'warning'" class="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+        </svg>
+        <svg v-else class="w-5 h-5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
           <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
         </svg>
-        <span>{{ toast.message }}</span>
+        <span class="whitespace-pre-line">{{ toast.message }}</span>
       </div>
     </div>
   </div>
@@ -324,6 +330,7 @@ const newAccount = ref({
   password: ''
 })
 const batchAccounts = ref('')
+const isBatchAdding = ref(false)
 
 // 分页相关
 const displayedTokens = ref([])
@@ -524,8 +531,11 @@ const addToken = async () => {
 }
 
 const addBatchTokens = async () => {
+  if (isBatchAdding.value) return
+  isBatchAdding.value = true
+
   try {
-    await axios.post('/api/setAccounts', { accounts: batchAccounts.value }, {
+    const res = await axios.post('/api/setAccounts', { accounts: batchAccounts.value }, {
       headers: {
         'Authorization': localStorage.getItem('apiKey') || ''
       }
@@ -533,10 +543,20 @@ const addBatchTokens = async () => {
     showAddModal.value = false
     batchAccounts.value = ''
     await getTokens()
-    showToast('批量添加任务已提交')
+
+    const { success, failed, skipped, failedEmails } = res.data
+    let msg = `批量添加完成: 成功${success}个`
+    if (failed > 0) msg += `, 失败${failed}个`
+    if (skipped > 0) msg += `, 跳过${skipped}个(已存在)`
+    if (failedEmails?.length > 0) {
+      msg += `\n失败账号: ${failedEmails.join(', ')}`
+    }
+    showToast(msg, failed > 0 ? 'warning' : 'success')
   } catch (error) {
     console.error('批量添加失败:', error)
     showToast('批量添加失败: ' + error.message, 'error')
+  } finally {
+    isBatchAdding.value = false
   }
 }
 

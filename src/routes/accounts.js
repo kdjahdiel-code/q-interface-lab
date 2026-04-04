@@ -128,10 +128,10 @@ router.delete('/deleteAccount', adminKeyVerify, async (req, res) => {
 
 /**
  * POST /setAccounts
- * 批量添加账号
- * 
+ * 批量添加账号（并行处理）
+ *
  * @param {string} accounts 账号列表
- * @returns {Object} 账号信息
+ * @returns {Object} 添加结果统计
  */
 router.post('/setAccounts', adminKeyVerify, async (req, res) => {
   try {
@@ -141,29 +141,74 @@ router.post('/setAccounts', adminKeyVerify, async (req, res) => {
     }
 
     accounts = accounts.replace(/[\r]/g, '\n')
-    accounts = accounts.split('\n').filter(item => item.trim() !== '')
+    const accountList = accounts.split('\n').filter(item => item.trim() !== '')
 
-    for (const account of accounts) {
+    if (accountList.length === 0) {
+      return res.status(400).json({ error: '没有有效的账号' })
+    }
+
+    // 解析账号列表
+    const parsedAccounts = accountList.map(account => {
       const [email, password] = account.split(':')
-      if (!email || !password) {
-        continue
-      }
+      return { email: email?.trim(), password: password?.trim() }
+    }).filter(acc => acc.email && acc.password)
 
-      const authToken = await accountManager.login(email, password)
-      if (!authToken) {
-        continue
-      }
-      // 解析JWT
-      const decoded = JwtDecode(authToken)
-      const expires = decoded.exp
+    // 过滤已存在的账号
+    const existingEmails = new Set(accountManager.getAllAccountKeys().map(acc => acc.email))
+    const newAccounts = parsedAccounts.filter(acc => !existingEmails.has(acc.email))
+    const skippedCount = parsedAccounts.length - newAccounts.length
 
-      const success = await saveAccounts(email, password, authToken, expires)
-      if (!success) {
-        continue
+    // 并行登录（限制并发数为5）
+    const concurrencyLimit = 5
+    const results = []
+
+    for (let i = 0; i < newAccounts.length; i += concurrencyLimit) {
+      const batch = newAccounts.slice(i, i + concurrencyLimit)
+      const batchResults = await Promise.allSettled(
+        batch.map(async ({ email, password }) => {
+          const authToken = await accountManager.login(email, password)
+          if (!authToken) {
+            throw new Error(`${email} 登录失败`)
+          }
+          const decoded = JwtDecode(authToken)
+          return { email, password, token: authToken, expires: decoded.exp }
+        })
+      )
+      // 记录每个结果对应的邮箱
+      batchResults.forEach((result, idx) => {
+        results.push({ ...result, email: batch[idx].email })
+      })
+    }
+
+    // 统计结果并保存成功的账号
+    let successCount = 0
+    let failedCount = 0
+    const failedEmails = []
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        const { email, password, token, expires } = result.value
+        const saved = await accountManager.addAccountWithToken(email, password, token, expires)
+        if (saved) {
+          successCount++
+        } else {
+          failedCount++
+          failedEmails.push(email)
+        }
+      } else {
+        failedCount++
+        failedEmails.push(result.email)
       }
     }
 
-    res.json({ message: '账号批量添加任务提交成功' })
+    res.json({
+      message: '批量添加完成',
+      total: parsedAccounts.length,
+      success: successCount,
+      failed: failedCount,
+      skipped: skippedCount,
+      failedEmails: failedEmails.slice(0, 10) // 最多返回10个失败邮箱
+    })
   } catch (error) {
     logger.error('批量创建账号失败', 'ACCOUNT', '', error)
     res.status(500).json({ error: error.message })

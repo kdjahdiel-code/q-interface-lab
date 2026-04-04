@@ -539,6 +539,42 @@ class Account {
     }
 
     /**
+     * 直接添加账户（已有token，无需登录）
+     * @param {string} email - 邮箱
+     * @param {string} password - 密码
+     * @param {string} token - 已获取的令牌
+     * @param {number} expires - 过期时间戳
+     * @returns {Promise<boolean>} 添加是否成功
+     */
+    async addAccountWithToken(email, password, token, expires) {
+        try {
+            // 检查账户是否已存在
+            const existingAccount = this.accountTokens.find(acc => acc.email === email)
+            if (existingAccount) {
+                logger.warn(`账户 ${email} 已存在`, 'ACCOUNT')
+                return false
+            }
+
+            const newAccount = { email, password, token, expires }
+
+            // 添加到内存
+            this.accountTokens.push(newAccount)
+
+            // 保存到持久化存储
+            await this.dataPersistence.saveAccount(email, newAccount)
+
+            // 更新轮询器
+            this.accountRotator.setAccounts(this.accountTokens)
+
+            logger.success(`成功添加账户: ${email}`, 'ACCOUNT')
+            return true
+        } catch (error) {
+            logger.error(`添加账户失败 (${email})`, 'ACCOUNT', '', error)
+            return false
+        }
+    }
+
+    /**
      * 移除账户
      * @param {string} email - 邮箱地址
      * @returns {Promise<boolean>} 移除是否成功
