@@ -6,6 +6,11 @@ const { logger } = require('../utils/logger')
 const { JwtDecode } = require('../utils/tools')
 const { adminKeyVerify } = require('../middlewares/authorization')
 const { deleteAccount, saveAccounts, refreshAccountToken } = require('../utils/setting')
+const { parseAccountLine } = require('../utils/account-parser')
+const { isValidProxyUrl } = require('../utils/proxy-helper')
+
+// 仅在 proxy 字段存在时触发；空字符串/null 一律视为"清除代理"，无需校验
+const PROXY_FORMAT_ERROR = '代理 URL 格式无效，应以 http://、https:// 或 socks5:// 开头'
 
 const batchAccountTasks = new Map()
 const BATCH_TASK_RETENTION_MS = 1000 * 60 * 30
@@ -29,8 +34,11 @@ const scheduleBatchTaskCleanup = (taskId) => {
 
 /**
  * 解析批量账号文本
+ * 行格式（与 ENV ACCOUNTS 一致）：
+ *   email:password                  — 老格式
+ *   email:password|proxy_url        — 新格式，附带账号级代理
  * @param {string} accountsText - 原始账号文本
- * @returns {{ accountLines: string[], parsedAccounts: Array<{ email: string, password: string }>, invalidCount: number }} 解析结果
+ * @returns {{ accountLines: string[], parsedAccounts: Array<{ email: string, password: string, proxy: string|null }>, invalidCount: number }} 解析结果
  */
 const parseBatchAccountsText = (accountsText) => {
   const normalizedText = String(accountsText).replace(/[\r]/g, '\n')
@@ -43,21 +51,17 @@ const parseBatchAccountsText = (accountsText) => {
   let invalidCount = 0
 
   for (const accountLine of accountLines) {
-    const separatorIndex = accountLine.indexOf(':')
-    if (separatorIndex === -1) {
+    const parsed = parseAccountLine(accountLine)
+    if (!parsed) {
       invalidCount++
       continue
     }
-
-    const email = accountLine.slice(0, separatorIndex).trim()
-    const password = accountLine.slice(separatorIndex + 1).trim()
-
-    if (!email || !password) {
+    // 行格式合法但 proxy 字段格式错误，整行视为无效，避免后续登录后才暴露失败
+    if (parsed.proxy && !isValidProxyUrl(parsed.proxy)) {
       invalidCount++
       continue
     }
-
-    parsedAccounts.push({ email, password })
+    parsedAccounts.push(parsed)
   }
 
   return {
@@ -175,10 +179,10 @@ const updateBatchTaskMessage = (task) => {
 /**
  * 执行单个账号的批量登录任务
  * @param {object} task - 任务对象
- * @param {{ email: string, password: string }} account - 账号信息
+ * @param {{ email: string, password: string, proxy: string|null }} account - 账号信息
  */
 const processBatchAccountItem = async (task, account) => {
-  const { email, password } = account
+  const { email, password, proxy } = account
   task.activeEmails.push(email)
   updateBatchTaskMessage(task)
 
@@ -189,7 +193,7 @@ const processBatchAccountItem = async (task, account) => {
     }
 
     const decoded = JwtDecode(authToken)
-    const saved = await accountManager.addAccountWithToken(email, password, authToken, decoded.exp)
+    const saved = await accountManager.addAccountWithToken(email, password, authToken, decoded.exp, proxy)
     if (!saved) {
       throw new Error('保存失败')
     }
@@ -287,7 +291,8 @@ router.get('/getAllAccounts', adminKeyVerify, async (req, res) => {
         email: account.email,
         password: account.password,
         token: account.token,
-        expires: account.expires
+        expires: account.expires,
+        proxy: account.proxy ?? null
       }
     })
 
@@ -306,17 +311,26 @@ router.get('/getAllAccounts', adminKeyVerify, async (req, res) => {
 /**
  * POST /setAccount
  * 添加账号
- * 
+ *
  * @param {string} email 邮箱
  * @param {string} password 密码
+ * @param {string} [proxy] 账号专属代理 URL（可选，HTTP/HTTPS/SOCKS5）
  * @returns {Object} 账号信息
  */
 router.post('/setAccount', adminKeyVerify, async (req, res) => {
   try {
-    const { email, password } = req.body
+    const { email, password, proxy } = req.body
 
     if (!email || !password) {
       return res.status(400).json({ error: '邮箱和密码不能为空' })
+    }
+
+    // 规范化 proxy：空字符串/纯空白/非字符串 → null
+    const normalizedProxy = (typeof proxy === 'string' && proxy.trim()) ? proxy.trim() : null
+
+    // 防御性校验：拦截明显的拼写错误（缺协议等），运行时才暴露的错误对用户不友好
+    if (normalizedProxy && !isValidProxyUrl(normalizedProxy)) {
+      return res.status(400).json({ error: PROXY_FORMAT_ERROR })
     }
 
     // 检查账号是否已存在
@@ -333,7 +347,7 @@ router.post('/setAccount', adminKeyVerify, async (req, res) => {
     const decoded = JwtDecode(authToken)
     const expires = decoded.exp
 
-    const success = await saveAccounts(email, password, authToken, expires)
+    const success = await saveAccounts(email, password, authToken, expires, normalizedProxy)
 
     if (success) {
       res.status(200).json({
@@ -459,6 +473,51 @@ router.get('/batchTasks/:taskId', adminKeyVerify, async (req, res) => {
   }
 
   res.json(getBatchTaskSnapshot(task))
+})
+
+/**
+ * POST /updateAccountProxy
+ * 更新账号专属代理 URL
+ * 传入空字符串/null 视为清除代理，回退到全局 PROXY_URL（若存在）
+ *
+ * @param {string} email 邮箱
+ * @param {string|null} proxy 新代理 URL，空表示清除
+ * @returns {Object} 更新结果
+ */
+router.post('/updateAccountProxy', adminKeyVerify, async (req, res) => {
+  try {
+    const { email, proxy } = req.body
+
+    if (!email) {
+      return res.status(400).json({ error: '邮箱不能为空' })
+    }
+
+    // 同 /setAccount：仅在传入了非空 proxy 时才校验格式；空值用于清除
+    const normalizedProxy = (typeof proxy === 'string' && proxy.trim()) ? proxy.trim() : null
+    if (normalizedProxy && !isValidProxyUrl(normalizedProxy)) {
+      return res.status(400).json({ error: PROXY_FORMAT_ERROR })
+    }
+
+    const exists = accountManager.accountTokens.find(item => item.email === email)
+    if (!exists) {
+      return res.status(404).json({ error: '账号不存在' })
+    }
+
+    const success = await accountManager.updateAccountProxy(email, normalizedProxy)
+
+    if (success) {
+      res.json({
+        message: '账号代理更新成功',
+        email,
+        proxy: exists.proxy ?? null
+      })
+    } else {
+      res.status(500).json({ error: '账号代理更新失败' })
+    }
+  } catch (error) {
+    logger.error('更新账号代理失败', 'ACCOUNT', '', error)
+    res.status(500).json({ error: error.message })
+  }
 })
 
 /**

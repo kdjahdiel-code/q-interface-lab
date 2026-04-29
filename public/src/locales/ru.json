@@ -31,7 +31,7 @@
     "batchAdd": "Пакетное добавление",
     "addTitle": "Добавить аккаунт",
     "batchTitle": "Пакетное добавление аккаунтов",
-    "batchLabel": "Список аккаунтов (по одному на строку, формат: email:password)",
+    "batchLabel": "Список аккаунтов (по одному на строку, формат: email:password или email:password{'|'}proxy_url)",
     "taskStatus": "Статус задачи",
     "taskId": "ID задачи:",
     "progress": "Прогресс",
@@ -52,7 +52,14 @@
     "statusRunning": "Выполняется",
     "statusPending": "В очереди",
     "statusNotStarted": "Не начато",
-    "copiedToClipboard": "Скопировано"
+    "copiedToClipboard": "Скопировано",
+    "proxyLabel": "Proxy URL (необязательно)",
+    "proxyPlaceholder": "http://user:pass{'@'}host:port",
+    "editProxy": "Изменить proxy",
+    "editProxyTitle": "Изменить proxy",
+    "editProxyHint": "Оставьте пустым, чтобы очистить и использовать глобальный PROXY_URL",
+    "clearProxy": "Очистить",
+    "save": "Сохранить"
   },
   "msg": {
     "batchComplete": "Добавление завершено: успешно {n}",
@@ -85,7 +92,10 @@
     "exportEmpty": "Нет аккаунтов для экспорта",
     "copyFailed": "Ошибка копирования",
     "refreshAllFailed": "Ошибка обновления: ",
-    "forceRefreshAllFailed": "Ошибка принудительного обновления: "
+    "forceRefreshAllFailed": "Ошибка принудительного обновления: ",
+    "proxyUpdateSuccess": "Proxy обновлён",
+    "proxyUpdateFailed": "Ошибка обновления proxy: ",
+    "proxyInvalid": "Неверный формат: ожидается http://, https:// или socks5://"
   },
   "settings": {
     "title": "Настройки",

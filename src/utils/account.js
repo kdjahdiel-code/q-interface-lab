@@ -100,7 +100,7 @@ class Account {
     async _loginEnvironmentAccounts() {
         const loginPromises = this.accountTokens.map(async (account) => {
             if (!account.token && account.email && account.password) {
-                const token = await this.tokenManager.login(account.email, account.password)
+                const token = await this.tokenManager.login(account.email, account.password, account)
                 if (token) {
                     const decoded = this.tokenManager.validateToken(token)
                     if (decoded) {
@@ -123,7 +123,7 @@ class Account {
     async _initializeCliAccount(account) {
         try {
             const cliManager = require('./cli.manager')
-            const cliAccount = await cliManager.initCliAccount(account.token)
+            const cliAccount = await cliManager.initCliAccount(account.token, account)
 
             if (cliAccount.access_token && cliAccount.refresh_token && cliAccount.expiry_date) {
                 account.cli_info = {
@@ -136,7 +136,7 @@ class Account {
                                 access_token: account.cli_info.access_token,
                                 refresh_token: account.cli_info.refresh_token,
                                 expiry_date: account.cli_info.expiry_date
-                            })
+                            }, account)
                             if (refreshToken.access_token && refreshToken.refresh_token && refreshToken.expiry_date) {
                                 account.cli_info.access_token = refreshToken.access_token
                                 account.cli_info.refresh_token = refreshToken.refresh_token
@@ -210,7 +210,7 @@ class Account {
             } else if (account.email && account.password) {
                 // 尝试重新登录
                 logger.info(`令牌无效，尝试重新登录: ${account.email}`, 'TOKEN', '🔄')
-                const newToken = await this.tokenManager.login(account.email, account.password)
+                const newToken = await this.tokenManager.login(account.email, account.password, account)
                 if (newToken) {
                     const decoded = this.tokenManager.validateToken(newToken)
                     if (decoded) {
@@ -269,7 +269,8 @@ class Account {
                     await this.dataPersistence.saveAccount(account.email, {
                         password: updatedAccount.password,
                         token: updatedAccount.token,
-                        expires: updatedAccount.expires
+                        expires: updatedAccount.expires,
+                        proxy: updatedAccount.proxy ?? account.proxy ?? null
                     })
 
                     // 重置失败计数
@@ -301,10 +302,10 @@ class Account {
     }
 
     /**
-     * 获取可用的账户令牌
-     * @returns {string|null} 账户令牌或null
+     * 获取下一个可用的账户对象（包含 proxy 等完整字段）
+     * @returns {Object|null} 账户对象或 null
      */
-    getAccountToken() {
+    getAccount() {
         if (!this.isInitialized) {
             logger.warn('账户管理器尚未初始化完成', 'ACCOUNT')
             return null
@@ -315,16 +316,44 @@ class Account {
             return null
         }
 
-        const token = this.accountRotator.getNextToken()
-        if (!token) {
+        const account = this.accountRotator.getNextAccount()
+        if (!account) {
             logger.error('所有账户令牌都不可用', 'ACCOUNT')
         }
 
-        return token
+        return account
     }
 
     /**
-     * 根据邮箱获取特定账户的令牌
+     * 获取可用的账户令牌（向后兼容的便捷方法）
+     * @returns {string|null} 账户令牌或null
+     */
+    getAccountToken() {
+        const account = this.getAccount()
+        return account ? account.token : null
+    }
+
+    /**
+     * 根据邮箱获取特定账户对象
+     * @param {string} email - 邮箱地址
+     * @returns {Object|null} 账户对象或 null
+     */
+    getAccountByEmail(email) {
+        return this.accountRotator.getAccountByEmail(email)
+    }
+
+    /**
+     * 根据令牌反查账户对象（用于只持有 token 的下游调用解析账号级代理）
+     * @param {string} token - 访问令牌
+     * @returns {Object|null} 账户对象或 null
+     */
+    getAccountByToken(token) {
+        if (!token) return null
+        return this.accountTokens.find(acc => acc.token === token) || null
+    }
+
+    /**
+     * 根据邮箱获取特定账户的令牌（向后兼容）
      * @param {string} email - 邮箱地址
      * @returns {string|null} 账户令牌或null
      */
@@ -343,7 +372,8 @@ class Account {
                 await this.dataPersistence.saveAccount(account.email, {
                     password: account.password,
                     token: account.token,
-                    expires: account.expires
+                    expires: account.expires,
+                    proxy: account.proxy ?? null
                 })
             }
         } catch (error) {
@@ -375,7 +405,8 @@ class Account {
             await this.dataPersistence.saveAccount(email, {
                 password: updatedAccount.password,
                 token: updatedAccount.token,
-                expires: updatedAccount.expires
+                expires: updatedAccount.expires,
+                proxy: updatedAccount.proxy ?? account.proxy ?? null
             })
 
             // 重置失败计数
@@ -493,9 +524,10 @@ class Account {
      * 添加新账户
      * @param {string} email - 邮箱
      * @param {string} password - 密码
+     * @param {string|null} [proxy] - 账号专属代理 URL（HTTP/HTTPS/SOCKS5）
      * @returns {Promise<boolean>} 添加是否成功
      */
-    async addAccount(email, password) {
+    async addAccount(email, password, proxy = null) {
         try {
             // 检查账户是否已存在
             const existingAccount = this.accountTokens.find(acc => acc.email === email)
@@ -521,7 +553,8 @@ class Account {
                 email,
                 password,
                 token,
-                expires: decoded.exp
+                expires: decoded.exp,
+                proxy: (typeof proxy === 'string' && proxy.trim()) ? proxy.trim() : null
             }
 
             // 添加到内存
@@ -554,9 +587,10 @@ class Account {
      * @param {string} password - 密码
      * @param {string} token - 已获取的令牌
      * @param {number} expires - 过期时间戳
+     * @param {string|null} [proxy] - 账号专属代理 URL
      * @returns {Promise<boolean>} 添加是否成功
      */
-    async addAccountWithToken(email, password, token, expires) {
+    async addAccountWithToken(email, password, token, expires, proxy = null) {
         try {
             // 检查账户是否已存在
             const existingAccount = this.accountTokens.find(acc => acc.email === email)
@@ -565,7 +599,13 @@ class Account {
                 return false
             }
 
-            const newAccount = { email, password, token, expires }
+            const newAccount = {
+                email,
+                password,
+                token,
+                expires,
+                proxy: (typeof proxy === 'string' && proxy.trim()) ? proxy.trim() : null
+            }
 
             // 添加到内存
             this.accountTokens.push(newAccount)
@@ -587,6 +627,59 @@ class Account {
             return true
         } catch (error) {
             logger.error(`添加账户失败 (${email})`, 'ACCOUNT', '', error)
+            return false
+        }
+    }
+
+    /**
+     * 更新账户的代理 URL
+     * 同时使旧 URL 对应的 agent 失效（释放底层 socket）
+     * @param {string} email - 邮箱
+     * @param {string|null} proxy - 新代理 URL，空字符串/null 表示清除
+     * @returns {Promise<boolean>} 更新是否成功
+     */
+    async updateAccountProxy(email, proxy) {
+        try {
+            const account = this.accountTokens.find(acc => acc.email === email)
+            if (!account) {
+                logger.warn(`账户 ${email} 不存在`, 'ACCOUNT')
+                return false
+            }
+
+            const oldProxy = account.proxy || null
+            const newProxy = (typeof proxy === 'string' && proxy.trim()) ? proxy.trim() : null
+
+            if (oldProxy === newProxy) {
+                logger.info(`账户 ${email} 代理未变化，无需更新`, 'ACCOUNT')
+                return true
+            }
+
+            // 先更新内存，再持久化；持久化失败时回滚
+            account.proxy = newProxy
+            const saved = await this.dataPersistence.saveAccount(email, {
+                password: account.password,
+                token: account.token,
+                expires: account.expires,
+                proxy: newProxy
+            })
+            if (!saved) {
+                account.proxy = oldProxy
+                logger.error(`账户 ${email} 代理持久化失败，已回滚内存数据`, 'ACCOUNT')
+                return false
+            }
+
+            // 旧代理 URL 不再被该账户引用，主动失效缓存
+            // 注意：其他账户可能仍在使用同一 URL，但 invalidate 仅按 URL 操作；
+            // 多账户共享代理的场景下后续请求会重新创建 agent，安全
+            if (oldProxy && oldProxy !== newProxy) {
+                const { invalidateProxyAgent } = require('./proxy-helper')
+                invalidateProxyAgent(oldProxy)
+            }
+
+            logger.success(`账户 ${email} 代理更新成功 (${oldProxy || '无'} → ${newProxy || '无'})`, 'ACCOUNT')
+            return true
+        } catch (error) {
+            logger.error(`更新账户 ${email} 代理失败`, 'ACCOUNT', '', error)
             return false
         }
     }

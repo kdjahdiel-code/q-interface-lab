@@ -119,16 +119,16 @@ class DataPersistence {
       return []
     }
 
-    const { JwtDecode } = require('./tools')
+    const { parseAccountLine } = require('./account-parser')
     const accountTokens = process.env.ACCOUNTS.split(',')
     const accounts = []
 
+    // 解析委托给共用 parser，与后台批量添加保持一致；
+    // 注意：这里仅加载凭据，token 在 Account 类中按需登录获取
     for (const item of accountTokens) {
-      const [email, password] = item.split(':')
-      if (email && password) {
-        // 注意：这里需要登录获取token，但在加载阶段不应该进行网络请求
-        // 这个逻辑需要在Account类中处理
-        accounts.push({ email, password, token: null, expires: null })
+      const parsed = parseAccountLine(item)
+      if (parsed) {
+        accounts.push({ ...parsed, token: null, expires: null })
       }
     }
 
@@ -163,7 +163,8 @@ class DataPersistence {
       email,
       password: accountData.password,
       token: accountData.token,
-      expires: accountData.expires
+      expires: accountData.expires,
+      proxy: accountData.proxy ?? null
     }
 
     if (existingIndex !== -1) {
@@ -203,7 +204,8 @@ class DataPersistence {
       email: account.email,
       password: account.password,
       token: account.token,
-      expires: account.expires
+      expires: account.expires,
+      proxy: account.proxy ?? null
     }))
 
     await fs.writeFile(this.dataFilePath, JSON.stringify(data, null, 2), 'utf-8')
