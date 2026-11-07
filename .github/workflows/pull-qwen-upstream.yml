@@ -1,0 +1,265 @@
+name: Pull Qwen Upstream Latest Tag
+
+on:
+  schedule:
+    # 每天 UTC 20:00 运行（北京时间 凌晨 03:00）
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "导入到当前仓库的目标分支"
+        required: false
+        default: "main"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pull-qwen-upstream-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Rfym21/Qwen2API
+  WORKFLOW_FILE: .github/workflows/pull-qwen-upstream.yml
+
+jobs:
+  pull-upstream:
+    name: Pull Qwen latest tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Random delay for scheduled run
+        if: github.event_name == 'schedule'
+        run: |
+          DELAY=$((RANDOM % 1800))
+          echo "定时任务随机等待 ${DELAY} 秒..."
+          sleep ${DELAY}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve latest upstream tag
+        id: resolve_tag
+        run: |
+          UPSTREAM_URL="https://github.com/${UPSTREAM_REPO}.git"
+
+          echo "开始查询上游仓库最新 tag: ${UPSTREAM_REPO}"
+
+          LATEST_TAG="$(git ls-remote --tags --refs "${UPSTREAM_URL}" \
+            | awk '{ print $2 }' \
+            | sed 's#refs/tags/##' \
+            | sort -V \
+            | tail -n 1)"
+
+          if [ -n "${LATEST_TAG}" ]; then
+            echo "✅ 使用上游最新 tag: ${LATEST_TAG}"
+            echo "ref=${LATEST_TAG}" >> "${GITHUB_OUTPUT}"
+            echo "type=tag" >> "${GITHUB_OUTPUT}"
+          else
+            echo "⚠️ 上游没有 tag，使用默认分支 main"
+            echo "ref=main" >> "${GITHUB_OUTPUT}"
+            echo "type=branch" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "url=${UPSTREAM_URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check if already up to date
+        run: |
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+          UPSTREAM_TYPE="${{ steps.resolve_tag.outputs.type }}"
+          
+          if [ "$UPSTREAM_TYPE" = "tag" ]; then
+            CURRENT_REF=$(git describe --tags --always 2>/dev/null || echo "none")
+            if [ "$CURRENT_REF" = "$UPSTREAM_REF" ]; then
+              echo "✅ 当前仓库已是最新版本 $UPSTREAM_REF，无需更新"
+              exit 0
+            fi
+            echo "需要更新: 当前 $CURRENT_REF → 最新 $UPSTREAM_REF"
+          else
+            echo "⚠️ 使用分支模式，跳过版本检查"
+          fi
+
+      - name: Backup workflow files
+        run: |
+          BACKUP_DIR="/tmp/workflow-backup"
+
+          if [ ! -f "${WORKFLOW_FILE}" ]; then
+            echo "❌ 当前仓库中找不到 ${WORKFLOW_FILE}"
+            echo "请确认 workflow 文件路径正确"
+            exit 1
+          fi
+
+          rm -rf "${BACKUP_DIR}"
+          mkdir -p "${BACKUP_DIR}"
+
+          cp "${WORKFLOW_FILE}" "${BACKUP_DIR}/pull-qwen-upstream.yml"
+
+          echo "✅ 当前拉取 workflow 文件已备份"
+
+      - name: Fetch upstream latest tag
+        run: |
+          UPSTREAM_URL="${{ steps.resolve_tag.outputs.url }}"
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+          UPSTREAM_TYPE="${{ steps.resolve_tag.outputs.type }}"
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "${UPSTREAM_URL}"
+
+          if [ "$UPSTREAM_TYPE" = "tag" ]; then
+            echo "开始拉取上游最新 tag: ${UPSTREAM_REPO}@${UPSTREAM_REF}"
+            git fetch --force upstream "refs/tags/${UPSTREAM_REF}:refs/tags/${UPSTREAM_REF}"
+            echo "✅ 上游最新 tag 已拉取到当前仓库"
+            git show --no-patch --oneline "refs/tags/${UPSTREAM_REF}"
+          else
+            echo "开始拉取上游默认分支: ${UPSTREAM_REPO}@${UPSTREAM_REF}"
+            git fetch --force upstream "refs/heads/${UPSTREAM_REF}:refs/remotes/upstream/${UPSTREAM_REF}"
+            echo "✅ 上游默认分支已拉取到当前仓库"
+          fi
+
+      - name: Checkout upstream latest tag and restore workflows
+        run: |
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+          UPSTREAM_TYPE="${{ steps.resolve_tag.outputs.type }}"
+          BACKUP_DIR="/tmp/workflow-backup"
+
+          if [ "$UPSTREAM_TYPE" = "tag" ]; then
+            echo "切换到上游最新 tag: ${UPSTREAM_REF}"
+            git checkout --detach "refs/tags/${UPSTREAM_REF}"
+          else
+            echo "切换到上游默认分支: ${UPSTREAM_REF}"
+            git checkout --detach "refs/remotes/upstream/${UPSTREAM_REF}"
+          fi
+
+          echo "删除上游自带 workflow 文件，避免 PAT 缺少 workflow scope 导致推送失败..."
+          rm -rf .github/workflows
+
+          echo "恢复当前拉取 workflow 文件..."
+          mkdir -p .github/workflows
+          cp "${BACKUP_DIR}/pull-qwen-upstream.yml" "${WORKFLOW_FILE}"
+
+          echo "✅ 已切换到上游最新 tag，并仅恢复当前拉取 workflow 文件"
+
+      - name: Generate neutral README
+        run: |
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+
+          echo "生成中性的学习项目 README..."
+
+          {
+            printf '%s\n' '# Programming Study Notes'
+            printf '%s\n' ''
+            printf '%s\n' '这是一个用于学习编程和熟悉工程实践的个人项目。'
+            printf '%s\n' ''
+            printf '%s\n' '## 项目用途'
+            printf '%s\n' ''
+            printf '%s\n' '本项目主要用于：'
+            printf '%s\n' ''
+            printf '%s\n' '- 学习基础编程结构'
+            printf '%s\n' '- 熟悉项目目录组织方式'
+            printf '%s\n' '- 练习配置文件管理'
+            printf '%s\n' '- 了解自动化流程'
+            printf '%s\n' '- 记录个人学习过程'
+            printf '%s\n' ''
+            printf '%s\n' '## 当前版本'
+            printf '%s\n' ''
+            printf '%s\n' "当前同步版本：${UPSTREAM_REF}"
+            printf '%s\n' ''
+            printf '%s\n' '## 学习内容'
+            printf '%s\n' ''
+            printf '%s\n' '可以通过本项目了解以下内容：'
+            printf '%s\n' ''
+            printf '%s\n' '- 代码仓库的基本结构'
+            printf '%s\n' '- 配置文件的组织方式'
+            printf '%s\n' '- 自动化任务的执行流程'
+            printf '%s\n' '- 日志查看和问题排查'
+            printf '%s\n' '- 版本记录和变更管理'
+            printf '%s\n' ''
+            printf '%s\n' '## 注意事项'
+            printf '%s\n' ''
+            printf '%s\n' '本仓库仅用于个人学习和技术实践。'
+            printf '%s\n' ''
+            printf '%s\n' '请不要在仓库中提交任何敏感信息，例如：'
+            printf '%s\n' ''
+            printf '%s\n' '- 密码'
+            printf '%s\n' '- Token'
+            printf '%s\n' '- 私钥'
+            printf '%s\n' '- 账号信息'
+            printf '%s\n' '- 个人隐私数据'
+            printf '%s\n' ''
+            printf '%s\n' '## 维护说明'
+            printf '%s\n' ''
+            printf '%s\n' '后续可以根据学习进度继续补充：'
+            printf '%s\n' ''
+            printf '%s\n' '- 学习笔记'
+            printf '%s\n' '- 配置说明'
+            printf '%s\n' '- 运行记录'
+            printf '%s\n' '- 问题总结'
+            printf '%s\n' '- 改进计划'
+          } > README.md
+
+          echo "✅ README.md 已更新为学习项目说明"
+
+      - name: Commit to target branch
+        id: commit
+        run: |
+          TARGET_BRANCH="${{ github.event.inputs.target_branch }}"
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+
+          if [ -z "${TARGET_BRANCH}" ]; then
+            TARGET_BRANCH="main"
+          fi
+
+          git checkout -B "${TARGET_BRANCH}"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "没有检测到文件变化，无需提交"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            git commit -m "chore: update programming study files ${UPSTREAM_REF}"
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "target_branch=${TARGET_BRANCH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Push main branch and cleaned tag
+        run: |
+          TARGET_BRANCH="${{ steps.commit.outputs.target_branch }}"
+          UPSTREAM_REF="${{ steps.resolve_tag.outputs.ref }}"
+          UPSTREAM_TYPE="${{ steps.resolve_tag.outputs.type }}"
+
+          if [ "$UPSTREAM_TYPE" = "tag" ]; then
+            echo "创建/更新当前仓库同名 tag: ${UPSTREAM_REF}"
+            git tag -f -a "${UPSTREAM_REF}" -m "Programming study snapshot ${UPSTREAM_REF}" HEAD
+          else
+            echo "分支模式，不创建 tag"
+          fi
+
+          echo "推送到当前私有仓库分支: ${TARGET_BRANCH}"
+          git push origin "HEAD:${TARGET_BRANCH}" --force-with-lease
+
+          if [ "$UPSTREAM_TYPE" = "tag" ]; then
+            echo "推送清理后的 tag 到当前私有仓库: ${UPSTREAM_REF}"
+            git push origin "refs/tags/${UPSTREAM_REF}:refs/tags/${UPSTREAM_REF}" --force
+          fi
+
+          echo "✅ 分支和清理后的 tag 推送完成"
+
+      - name: Summary
+        run: |
+          echo "========================================"
+          echo "项目: Programming Study Notes"
+          echo "来源: version snapshot"
+          echo "最新 ref: ${{ steps.resolve_tag.outputs.ref }}"
+          echo "目标分支: ${{ steps.commit.outputs.target_branch }}"
+          echo "是否有文件变化: ${{ steps.commit.outputs.changed }}"
+          echo "========================================"
+          echo "✅ 已完成学习项目快照更新，并将 tag 指向当前快照提交"
